@@ -24,6 +24,8 @@ import {
   ChevronDown,
   ChevronUp,
   Cpu,
+  X,
+  RefreshCw,
 } from 'lucide-react';
 
 interface LiveWebProxyBrowserProps {
@@ -39,6 +41,11 @@ export const LiveWebProxyBrowser: React.FC<LiveWebProxyBrowserProps> = ({ onAppl
   const [statusText, setStatusText] = useState('Connect DeltaMath tab to start');
   const [solveDurationMs, setSolveDurationMs] = useState<number | null>(null);
 
+  // HUD & UI States (Immediate response on click)
+  const [showHUD, setShowHUD] = useState<boolean>(false);
+  const [solveStatus, setSolveStatus] = useState<string>('');
+  const [ocrError, setOcrError] = useState<string | null>(null);
+
   // Active solution & detected text
   const [result, setResult] = useState<MathCalculatorResult | null>(null);
   const [rawCleanedText, setRawCleanedText] = useState<string>('');
@@ -49,6 +56,7 @@ export const LiveWebProxyBrowser: React.FC<LiveWebProxyBrowserProps> = ({ onAppl
   // Video and worker refs
   const videoRef = useRef<HTMLVideoElement>(null);
   const tesseractWorkerRef = useRef<any>(null);
+  const workerInitPromiseRef = useRef<Promise<any> | null>(null);
   const lastProcessedHashRef = useRef<number>(0);
   const isOcrRunningRef = useRef<boolean>(false);
 
@@ -63,20 +71,49 @@ export const LiveWebProxyBrowser: React.FC<LiveWebProxyBrowserProps> = ({ onAppl
     }
   }, [screenStream]);
 
-  // 2. Initialize Tesseract.js Web Worker (100% in-browser)
+  // Robust worker getter with timeout to prevent hanging
+  const getOrInitWorker = async (): Promise<any> => {
+    if (tesseractWorkerRef.current) {
+      return tesseractWorkerRef.current;
+    }
+    if (!workerInitPromiseRef.current) {
+      workerInitPromiseRef.current = (async () => {
+        try {
+          const timeout = new Promise((_, reject) =>
+            setTimeout(() => reject(new Error('OCR engine initialization timed out (10s)')), 10000)
+          );
+          const workerInstance = await Promise.race([createWorker('eng'), timeout]);
+          tesseractWorkerRef.current = workerInstance;
+          return workerInstance;
+        } catch (e) {
+          workerInitPromiseRef.current = null;
+          throw e;
+        }
+      })();
+    }
+    return workerInitPromiseRef.current;
+  };
+
+  const recognizeWithTimeout = async (worker: any, canvas: HTMLCanvasElement, timeoutMs = 12000): Promise<any> => {
+    const ocrPromise = worker.recognize(canvas);
+    const timeoutPromise = new Promise((_, reject) =>
+      setTimeout(() => reject(new Error('OCR recognition timed out after 12 seconds')), timeoutMs)
+    );
+    return Promise.race([ocrPromise, timeoutPromise]);
+  };
+
+  // 2. Pre-warm Tesseract.js Web Worker in background
   useEffect(() => {
     let active = true;
-    const initWorker = async () => {
-      try {
-        const worker = await createWorker('eng');
+    getOrInitWorker()
+      .then((worker) => {
         if (active) {
           tesseractWorkerRef.current = worker;
         }
-      } catch (err) {
-        console.warn('Tesseract worker initialization notice:', err);
-      }
-    };
-    initWorker();
+      })
+      .catch((err) => {
+        console.warn('Tesseract worker background prewarm notice:', err);
+      });
 
     return () => {
       active = false;
@@ -109,6 +146,8 @@ export const LiveWebProxyBrowser: React.FC<LiveWebProxyBrowserProps> = ({ onAppl
 
       setScreenStream(stream);
       setIsLinked(true);
+      setShowHUD(true);
+      setSolveStatus('Screen sync active. Watching for problem...');
       setStatusText('Screen sync active. Watching for problem...');
 
       const videoTrack = stream.getVideoTracks()[0];
@@ -117,6 +156,7 @@ export const LiveWebProxyBrowser: React.FC<LiveWebProxyBrowserProps> = ({ onAppl
           setIsLinked(false);
           setScreenStream(null);
           setStatusText('Tab stream ended');
+          setSolveStatus('Tab stream disconnected.');
         };
       }
     } catch (err: any) {
@@ -132,26 +172,140 @@ export const LiveWebProxyBrowser: React.FC<LiveWebProxyBrowserProps> = ({ onAppl
       setScreenStream(null);
       setIsLinked(false);
       setStatusText('Tab stream disconnected');
+      setSolveStatus('Tab stream disconnected');
     }
   };
 
-  // Safe solve routine: Canvas Crop -> Binarization Filter -> OCR -> Math Engine
+  // Immediate, explicit Solve Now handler with live UI feedback
+  const handleSolve = async () => {
+    // 1. Force Immediate UI Updates on Click
+    setShowHUD(true);
+    setIsAnalyzing(true);
+    setSolveStatus('Capturing screen...');
+    setOcrError(null);
+    setErrorNotice(null);
+
+    if (!videoRef.current || !screenStream) {
+      setSolveStatus('Error: Video stream not found.');
+      setOcrError('No active DeltaMath stream detected. Click "Connect DeltaMath Tab" first.');
+      setIsAnalyzing(false);
+      return;
+    }
+
+    const video = videoRef.current;
+    if (!video.videoWidth || !video.videoHeight || video.readyState < 2) {
+      setSolveStatus('Waiting for video frames...');
+      setOcrError('Video stream is still loading frames. Please wait a moment and click ⚡ Solve Now again.');
+      setIsAnalyzing(false);
+      return;
+    }
+
+    const startTime = performance.now();
+
+    try {
+      // 2. Perform canvas crop
+      setSolveStatus('Processing & cropping image...');
+      const prep = captureAndPreprocessFrame(video);
+      if (!prep) {
+        setSolveStatus('Error: Canvas crop failed.');
+        setOcrError('Could not capture frame from screen. Check display capture permissions.');
+        return;
+      }
+
+      // 3. Run OCR
+      setSolveStatus('Running OCR engine...');
+      let worker: any = null;
+      try {
+        worker = await getOrInitWorker();
+      } catch (wErr: any) {
+        console.warn('Worker load issue:', wErr);
+        setSolveStatus('OCR initialization error.');
+        setOcrError(`In-browser OCR engine could not start: ${wErr?.message || 'Worker failure'}. Try refreshing.`);
+        return;
+      }
+
+      setSolveStatus('Reading math from screen...');
+      const ocrResult: any = await recognizeWithTimeout(worker, prep.canvas, 12000);
+      const recognizedText = ocrResult?.data?.text || '';
+      const trimmed = recognizedText.trim();
+      setRawCleanedText(trimmed);
+
+      if (!trimmed || trimmed.length < 2) {
+        setSolveStatus('No text detected.');
+        setOcrError('OCR did not find readable characters in the center question box. Ensure the DeltaMath problem is visible on screen.');
+        return;
+      }
+
+      // 4. Check for Solution / Breakdown screen
+      const lowerText = trimmed.toLowerCase();
+      if (
+        lowerText.includes('your answer') ||
+        lowerText.includes('(incorrect)') ||
+        lowerText.includes('greatest common factor') ||
+        lowerText.includes('set equal to zero')
+      ) {
+        setSolveStatus('Solution screen detected.');
+        setOcrError('Detected teacher solution or previous incorrect breakdown. Navigate to the next active question.');
+        return;
+      }
+
+      // 5. Parse Math
+      setSolveStatus('Calculating answer...');
+      const solved = calculateMathProblem(trimmed);
+      const elapsed = Math.round(performance.now() - startTime);
+      setSolveDurationMs(elapsed);
+
+      if (solved) {
+        if ('error' in solved && solved.error) {
+          setSolveStatus(solved.error);
+          setOcrError(solved.error);
+          return;
+        }
+
+        const validResult = solved as MathCalculatorResult;
+        setResult(validResult);
+        setSolveStatus(`Solved in ${elapsed}ms (Offline Standalone)`);
+        setStatusText(`Solved in ${elapsed}ms`);
+        setOcrError(null);
+        if (onApplyResult) onApplyResult(validResult);
+
+        // Auto-copy to clipboard if enabled
+        if (autoCopyEnabled && validResult.deltaMathFormatAnswer) {
+          try {
+            await navigator.clipboard.writeText(validResult.deltaMathFormatAnswer);
+            setCopiedToast(true);
+            setTimeout(() => setCopiedToast(false), 2000);
+          } catch {
+            // Clipboard fallback
+          }
+        }
+      } else {
+        setSolveStatus('Could not identify equation.');
+        setOcrError(`Read OCR: "${trimmed.slice(0, 80)}". Could not match algebraic equation pattern.`);
+      }
+    } catch (err: any) {
+      console.error('Manual solve error:', err);
+      setSolveStatus(`Error: ${err?.message || 'Operation failed'}`);
+      setOcrError(err?.message || 'Failed to complete OCR analysis.');
+    } finally {
+      setIsAnalyzing(false);
+      isOcrRunningRef.current = false;
+    }
+  };
+
+  // Safe background watcher routine: Canvas Crop -> Binarization -> OCR -> Math Engine
   const executePipeline = async (forceSolve = false) => {
     const video = videoRef.current;
-    if (!video || !isLinked || isOcrRunningRef.current) return;
-
+    if (!video || !isLinked || isOcrRunningRef.current || isAnalyzing) return;
     if (!video.videoWidth || !video.videoHeight || video.readyState < 2) return;
 
     isOcrRunningRef.current = true;
-    setIsAnalyzing(true);
     const startTime = performance.now();
 
     try {
       // 1. Dynamic Canvas Crop & High-Contrast Binarization
       const prep = captureAndPreprocessFrame(video);
-      if (!prep) {
-        return;
-      }
+      if (!prep) return;
 
       // 2. 32-bit FNV-1a Hash Change-Detection (Auto-Watcher)
       const currentHash = computeFrameHash32(prep.canvas);
@@ -161,12 +315,15 @@ export const LiveWebProxyBrowser: React.FC<LiveWebProxyBrowserProps> = ({ onAppl
       lastProcessedHashRef.current = currentHash;
 
       // 3. In-Browser Tesseract OCR on Binarized Canvas
-      let recognizedText = '';
-      if (tesseractWorkerRef.current) {
-        const ocrResult = await tesseractWorkerRef.current.recognize(prep.canvas);
-        recognizedText = ocrResult?.data?.text || '';
+      let worker: any = null;
+      try {
+        worker = await getOrInitWorker();
+      } catch {
+        return;
       }
 
+      const ocrResult: any = await recognizeWithTimeout(worker, prep.canvas, 8000);
+      const recognizedText = ocrResult?.data?.text || '';
       const trimmed = recognizedText.trim();
       setRawCleanedText(trimmed);
 
@@ -174,7 +331,7 @@ export const LiveWebProxyBrowser: React.FC<LiveWebProxyBrowserProps> = ({ onAppl
         return;
       }
 
-      // 1. Ignore the Solution / Incorrect Pages
+      // Ignore the Solution / Incorrect Pages
       const lowerText = trimmed.toLowerCase();
       if (
         lowerText.includes('your answer') ||
@@ -191,14 +348,12 @@ export const LiveWebProxyBrowser: React.FC<LiveWebProxyBrowserProps> = ({ onAppl
       const elapsed = Math.round(performance.now() - startTime);
       setSolveDurationMs(elapsed);
 
-      if (solved) {
-        if ('error' in solved && solved.error) {
-          setStatusText(solved.error);
-          return;
-        }
-
+      if (solved && !('error' in solved && solved.error)) {
         const validResult = solved as MathCalculatorResult;
         setResult(validResult);
+        setShowHUD(true);
+        setOcrError(null);
+        setSolveStatus(`Solved in ${elapsed}ms (Offline Standalone)`);
         setStatusText(`Solved in ${elapsed}ms (Offline Standalone)`);
         if (onApplyResult) onApplyResult(validResult);
 
@@ -212,24 +367,11 @@ export const LiveWebProxyBrowser: React.FC<LiveWebProxyBrowserProps> = ({ onAppl
             // Clipboard auto-copy fallback
           }
         }
-      } else {
-        setStatusText('Watching for next question...');
       }
     } catch (err: any) {
       console.warn('Pipeline execution notice:', err);
-      // Keep UI completely intact; do not unmount or crash
     } finally {
       isOcrRunningRef.current = false;
-      setIsAnalyzing(false);
-    }
-  };
-
-  // Safe wrapper for manual "⚡ Solve Now" button
-  const handleSolve = async () => {
-    try {
-      await executePipeline(true);
-    } catch (err) {
-      console.warn('handleSolve safe catch:', err);
     }
   };
 
@@ -405,73 +547,124 @@ export const LiveWebProxyBrowser: React.FC<LiveWebProxyBrowserProps> = ({ onAppl
         )}
 
         {/* PART 3: Persistent Floating Solution Card Overlay in Top-Right Corner */}
-        {result && (
-          <div className="absolute top-4 right-4 max-w-sm w-full bg-slate-900/95 border-2 border-sky-500/60 rounded-xl p-4 shadow-2xl backdrop-blur-md text-xs space-y-2.5 z-20">
+        {/* Persistent Floating Solution HUD Overlay: Responds immediately on click */}
+        {(showHUD || result) && (
+          <div className="absolute top-3 right-3 sm:top-4 sm:right-4 max-w-sm w-[92%] sm:w-full bg-slate-900/95 border-2 border-sky-500/70 rounded-xl p-4 shadow-2xl backdrop-blur-md text-xs space-y-3 z-30 max-h-[calc(100%-24px)] overflow-y-auto">
             {/* Card Header: "DeltaSolve Engine • Standalone" */}
-            <div className="flex items-center justify-between border-b border-slate-800 pb-2">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-2.5">
               <span className="font-bold text-sky-400 text-xs flex items-center gap-1.5">
                 <span className="w-2 h-2 rounded-full bg-emerald-400 animate-ping" />
                 DeltaSolve Engine • Standalone
               </span>
 
-              {/* Click-to-Copy Button with 2s Green Checkmark confirmation */}
-              <button
-                type="button"
-                onClick={handleCopyAnswer}
-                className="px-2.5 py-1 bg-sky-600/30 hover:bg-sky-600/50 text-sky-200 border border-sky-500/30 rounded font-semibold text-xs flex items-center gap-1 transition cursor-pointer"
-              >
-                {copiedToast ? (
-                  <>
-                    <Check className="w-3.5 h-3.5 text-emerald-400" />
-                    <span className="text-emerald-400 font-bold">Copied!</span>
-                  </>
-                ) : (
-                  <>
-                    <Copy className="w-3.5 h-3.5" />
-                    <span>Copy</span>
-                  </>
+              <div className="flex items-center gap-1.5">
+                {result?.deltaMathFormatAnswer && (
+                  <button
+                    type="button"
+                    onClick={handleCopyAnswer}
+                    className="px-2.5 py-1 bg-sky-600/30 hover:bg-sky-600/50 text-sky-200 border border-sky-500/30 rounded font-semibold text-xs flex items-center gap-1 transition cursor-pointer"
+                  >
+                    {copiedToast ? (
+                      <>
+                        <Check className="w-3.5 h-3.5 text-emerald-400" />
+                        <span className="text-emerald-400 font-bold">Copied!</span>
+                      </>
+                    ) : (
+                      <>
+                        <Copy className="w-3.5 h-3.5" />
+                        <span>Copy</span>
+                      </>
+                    )}
+                  </button>
                 )}
-              </button>
+
+                <button
+                  type="button"
+                  onClick={() => setShowHUD(false)}
+                  className="p-1 text-slate-400 hover:text-white rounded hover:bg-slate-800 transition cursor-pointer"
+                  title="Close HUD"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              </div>
             </div>
 
-            {/* Answer Display: Large 24px mono text (e.g. 8, -4) */}
-            <div className="p-3 bg-slate-950 rounded-lg text-center border border-slate-800">
-              <div className="text-[10px] text-slate-400 uppercase tracking-wider mb-1 font-semibold">
-                DeltaMath Answer:
-              </div>
-              <div className="font-mono text-2xl font-black text-white break-all select-all tracking-wider text-emerald-400">
-                {result.deltaMathFormatAnswer}
-              </div>
-            </div>
-
-            {result.displayLatexAnswer && (
-              <div className="text-center pt-0.5">
-                <MathRenderer latex={result.displayLatexAnswer} className="text-base text-sky-300" />
+            {/* Immediate Loading Feedback while analyzing */}
+            {isAnalyzing && (
+              <div className="p-3 bg-sky-950/70 border border-sky-800/80 rounded-lg text-sky-200 flex items-center gap-3">
+                <Loader2 className="w-5 h-5 animate-spin text-sky-400 shrink-0" />
+                <div className="space-y-0.5">
+                  <div className="font-bold text-xs text-white">
+                    {solveStatus || 'Processing screen...'}
+                  </div>
+                  <div className="text-[10px] text-sky-300/80">Cropping problem & calculating math</div>
+                </div>
               </div>
             )}
 
-            <div className="text-[11px] text-slate-300 flex items-center justify-between pt-1">
-              <span className="text-emerald-400 font-medium">
-                {autoCopyEnabled ? '✓ Auto-copied to clipboard' : 'Click Copy to paste'}
-              </span>
-              <span className="text-slate-400 font-mono">
-                {solveDurationMs ? `${solveDurationMs}ms` : ''}
-              </span>
-            </div>
+            {/* Error or Notice Display */}
+            {ocrError && !isAnalyzing && (
+              <div className="p-3 bg-amber-950/40 border border-amber-800/60 rounded-lg text-amber-200 space-y-1">
+                <div className="flex items-center gap-1.5 font-bold text-amber-300 text-xs">
+                  <AlertCircle className="w-4 h-4 text-amber-400 shrink-0" />
+                  <span>Detection Status</span>
+                </div>
+                <p className="text-[11px] text-amber-200/90 leading-relaxed">{ocrError}</p>
+                <div className="pt-1.5 flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={handleSolve}
+                    className="px-2 py-1 bg-sky-600/30 hover:bg-sky-600/50 text-sky-200 border border-sky-500/30 rounded text-[10px] font-semibold flex items-center gap-1 cursor-pointer transition"
+                  >
+                    <RefreshCw className="w-3 h-3" />
+                    <span>Scan Again</span>
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Answer Display: Large 24px mono text (e.g. 8, -4) */}
+            {result && (
+              <>
+                <div className="p-3 bg-slate-950 rounded-lg text-center border border-slate-800 space-y-1">
+                  <div className="text-[10px] text-slate-400 uppercase tracking-wider font-semibold">
+                    DeltaMath Answer:
+                  </div>
+                  <div className="font-mono text-2xl font-black text-emerald-400 break-all select-all tracking-wider">
+                    {result.deltaMathFormatAnswer}
+                  </div>
+                </div>
+
+                {result.displayLatexAnswer && (
+                  <div className="text-center pt-0.5">
+                    <MathRenderer latex={result.displayLatexAnswer} className="text-base text-sky-300" />
+                  </div>
+                )}
+
+                <div className="text-[11px] text-slate-300 flex items-center justify-between pt-1">
+                  <span className="text-emerald-400 font-medium">
+                    {autoCopyEnabled ? '✓ Auto-copied to clipboard' : 'Click Copy to paste'}
+                  </span>
+                  <span className="text-slate-400 font-mono">
+                    {solveDurationMs ? `${solveDurationMs}ms` : ''}
+                  </span>
+                </div>
+              </>
+            )}
 
             {/* Debug View (Collapsed by default): Shows exact cleaned text read by OCR */}
             <div className="border-t border-slate-800/80 pt-2">
               <button
                 type="button"
                 onClick={() => setShowDebug(!showDebug)}
-                className="w-full flex items-center justify-between text-[11px] text-slate-400 hover:text-slate-200 font-medium py-0.5"
+                className="w-full flex items-center justify-between text-[11px] text-slate-400 hover:text-slate-200 font-medium py-0.5 cursor-pointer"
               >
-                <span>OCR Debug View</span>
+                <span>OCR Debug View {rawCleanedText ? '(Text Read)' : ''}</span>
                 {showDebug ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
               </button>
               {showDebug && (
-                <div className="mt-1.5 p-2 bg-slate-950 rounded text-[11px] font-mono text-slate-300 border border-slate-800 max-h-24 overflow-y-auto whitespace-pre-wrap">
-                  {rawCleanedText || result.rawTextCleaned || result.parsedProblem || 'No raw text available'}
+                <div className="mt-1.5 p-2 bg-slate-950 rounded text-[11px] font-mono text-slate-300 border border-slate-800 max-h-24 overflow-y-auto whitespace-pre-wrap select-all">
+                  {rawCleanedText || result?.rawTextCleaned || result?.parsedProblem || 'No raw text available'}
                 </div>
               )}
             </div>

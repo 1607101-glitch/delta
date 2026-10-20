@@ -18,6 +18,7 @@ export interface MathCalculatorResult {
   confidence: number;
   steps: SolverStep[];
   rawTextCleaned?: string;
+  error?: string;
 }
 
 /**
@@ -73,8 +74,98 @@ export function extractEquationLine(rawText: string): string {
 }
 
 /**
+ * Checks if the OCR text represents a DeltaMath Solution / Breakdown / Incorrect page
+ */
+export function checkSolutionScreen(rawText: string): { error: string } | null {
+  const lowerText = (rawText || '').toLowerCase();
+  if (
+    lowerText.includes('your answer') ||
+    lowerText.includes('(incorrect)') ||
+    lowerText.includes('greatest common factor') ||
+    lowerText.includes('set equal to zero')
+  ) {
+    return { error: 'Solution screen detected. Waiting for next problem...' };
+  }
+  return null;
+}
+
+/**
+ * Aggressive OCR Sanitizer (Fixing 'z' and brackets, KaTeX italic fonts, and vertical math lines)
+ */
+export function sanitizeOCR(text: string): string {
+  if (!text) return '';
+  let s = text.toLowerCase();
+
+  // Remove vertical math lines (e.g., standalone "+4  +4")
+  s = s.replace(/^\s*[+-]\d+\s+[+-]\d+\s*$/gm, '');
+
+  // Strip curly braces that KaTeX sometimes renders
+  s = s.replace(/[\{\}]/g, '');
+
+  // Fix italic 'x^2' misread as 'z', 'z'', 'i x?', '1 x?', etc.
+  s = s.replace(/\bz['`"’]\b/g, 'x^2');
+  s = s.replace(/\bz\^2\b/g, 'x^2');
+  s = s.replace(/\bi\s*x\?/g, 'x^2');
+  s = s.replace(/\b1\s*x\?/g, 'x^2');
+  s = s.replace(/\bz['`"’]/g, 'x^2');
+  s = s.replace(/\bi\s*2\?/g, 'x^2');
+  s = s.replace(/\b[I|l|1]\s*2\?/g, 'x^2');
+
+  // Fix isolated 'z' meant to be 'x'
+  s = s.replace(/\bz\b/g, 'x');
+
+  // Fix equals and minus blurring ("= -14" or "= -l4" instead of "= -4")
+  s = s.replace(/=\s*-[1l|](\d+)/g, '= -$1');
+
+  // Replace unicode dashes, minus signs, and math operators
+  s = s.replace(/[−–—]/g, '-');
+  s = s.replace(/[×•]/g, '*');
+  s = s.replace(/[÷]/g, '/');
+
+  // KaTeX Italic Exponent / Superscript 2 Normalizations
+  s = s.replace(/(?:^|(?<=[-+=\s(]))[I|l|1]\s*[2\^]\?/gi, 'x^2');
+  s = s.replace(/(?:^|(?<=[-+=\s(]))[I|l|1]\s*2\?/gi, 'x^2');
+  s = s.replace(/(?:^|(?<=[-+=\s(]))[I|l|1]\s*\^\s*2\b/gi, 'x^2');
+  s = s.replace(/(?:^|(?<=[-+=\s(]))[I|l|1]\s*2(?=\s*[-+*=])/gi, 'x^2');
+  s = s.replace(/(?:^|(?<=[-+=\s(]))\b2\s*\?\b/g, 'x^2');
+  s = s.replace(/(?:^|(?<=[-+=\s(]))\b2\s*2\?\b/g, 'x^2');
+
+  // Standard exponent normalizations: x², x2, x 2?
+  s = s.replace(/([a-zA-Z])\s*2\?/g, '$1^2');
+  s = s.replace(/([a-zA-Z])[²2]/g, '$1^2');
+  s = s.replace(/([a-zA-Z])\s*\^\s*2/g, '$1^2');
+
+  // KaTeX Cursive Italic 'x' Glyph Disambiguation
+  s = s.replace(/\)\s*[c\(\)]/g, 'x');
+  s = s.replace(/><|></g, 'x');
+  s = s.replace(/\}\s*\{/g, 'x');
+
+  // KaTeX Cursive Italic 'x' Confused With '2' or 'z' (e.g. "-42-32=0" -> "-4x-32=0")
+  s = s.replace(/(x\^2\s*[+-]\s*\d*)[2z]\s*([+-]\s*\d+\s*=)/gi, (match, prefix, suffix) => {
+    return `${prefix}x ${suffix}`;
+  });
+  s = s.replace(/(x\^2\s*[+-]\s*)(\d+)2\s*([+-]\s*\d+\s*=)/gi, '$1$2x $3');
+  s = s.replace(/([+-]?\s*\d+)[2z]\s*([+-]\s*\d+\s*=)/gi, '$1x $2');
+  s = s.replace(/(x\^2\s*[+-]\s*)[2z]\s*([+-]\s*\d+\s*=)/gi, '$1x $2');
+
+  // If equation has x^2 or x, replace remaining coefficient 'z' with 'x' (e.g. "-4z" -> "-4x")
+  if (/\bx\^2\b|\bx\b/i.test(s)) {
+    s = s.replace(/([+-]?\s*\d*)z\b/gi, '$1x');
+  }
+
+  // Common OCR number confusion:
+  s = s.replace(/(\d)[Oo]/g, '$10');
+  s = s.replace(/[Oo](\d)/g, '0$1');
+  s = s.replace(/([+\-=]\s*)[Oo](?!\w)/g, '$10');
+  s = s.replace(/(^|\s)[l|I](\s|$|[+\-*/=])/g, '$11$2');
+
+  // Normalize spaces
+  return s.replace(/\s+/g, ' ').trim();
+}
+
+/**
  * 1. OCR Normalization & Sanitization
- * Specifically targets KaTeX italic font misrecognitions (cursive x, exponents).
+ * Isolates equation line from UI chrome and runs aggressive math sanitization.
  */
 export function sanitizeMathOcrText(rawText: string): string {
   if (!rawText) return '';
@@ -95,68 +186,7 @@ export function sanitizeMathOcrText(rawText: string): string {
   cleaned = cleaned.replace(/delta\s*math/gi, '');
   cleaned = cleaned.replace(/calculator/gi, '');
 
-  // Step 3: Replace unicode dashes, minus signs, and math operators
-  cleaned = cleaned.replace(/[−–—]/g, '-');
-  cleaned = cleaned.replace(/[×•]/g, '*');
-  cleaned = cleaned.replace(/[÷]/g, '/');
-
-  // Fix OCR confusion for "= -": Tesseract frequently misreads "= -4" as "= -14" or "= -l4"
-  // because the space and negative sign blur together into a "1"
-  cleaned = cleaned.replace(/=\s*-[1l](\d+)/g, '= -$1');
-
-  // Fix OCR confusion for leading variable squared: "i x?", "I x?"
-  cleaned = cleaned.replace(/\bi\s*x\?/gi, 'x^2');
-
-  // Step 4: KaTeX Italic Exponent / Superscript 2 Normalizations
-  // In KaTeX italic math font, x² or x^2 is frequently misread by OCR as:
-  // "I 2?", "l 2?", "1 2?", "| 2?", "x 2?", "I 2^", "I 2", "2 2?"
-  cleaned = cleaned.replace(/(?:^|(?<=[-+=\s(]))[I|l|1]\s*[2\^]\?/gi, 'x^2');
-  cleaned = cleaned.replace(/(?:^|(?<=[-+=\s(]))[I|l|1]\s*2\?/gi, 'x^2');
-  cleaned = cleaned.replace(/(?:^|(?<=[-+=\s(]))[I|l|1]\s*\^\s*2\b/gi, 'x^2');
-  cleaned = cleaned.replace(/(?:^|(?<=[-+=\s(]))[I|l|1]\s*2(?=\s*[-+*=])/gi, 'x^2');
-  cleaned = cleaned.replace(/(?:^|(?<=[-+=\s(]))\b2\s*\?\b/g, 'x^2');
-  cleaned = cleaned.replace(/(?:^|(?<=[-+=\s(]))\b2\s*2\?\b/g, 'x^2');
-
-  // Standard exponent normalizations: x², x2, x 2?
-  cleaned = cleaned.replace(/([a-zA-Z])\s*2\?/g, '$1^2');
-  cleaned = cleaned.replace(/([a-zA-Z])[²2]/g, '$1^2');
-  cleaned = cleaned.replace(/([a-zA-Z])\s*\^\s*2/g, '$1^2');
-
-  // Step 5: KaTeX Cursive Italic 'x' Glyph Disambiguation
-  // Cursive x has curved loops that OCR often reads as ")c", ")(", "><", "}{"
-  cleaned = cleaned.replace(/\)\s*[c\(\)]/g, 'x');
-  cleaned = cleaned.replace(/><|></g, 'x');
-  cleaned = cleaned.replace(/\}\s*\{/g, 'x');
-
-  // Step 6: KaTeX Cursive Italic 'x' Confused With '2' or 'z' (e.g. "-42-32=0" -> "-4x-32=0")
-  // In a quadratic equation context: ax^2 + bx + c = 0
-  // When an equation starts with x^2 and is followed by -42-32=0 or -42 - 32 = 0,
-  // the '2' right after the coefficient -4 was the italic variable x!
-  cleaned = cleaned.replace(/(x\^2\s*[+-]\s*\d*)[2z]\s*([+-]\s*\d+\s*=)/gi, (match, prefix, suffix) => {
-    return `${prefix}x ${suffix}`;
-  });
-  cleaned = cleaned.replace(/(x\^2\s*[+-]\s*)(\d+)2\s*([+-]\s*\d+\s*=)/gi, '$1$2x $3');
-  cleaned = cleaned.replace(/([+-]?\s*\d+)[2z]\s*([+-]\s*\d+\s*=)/gi, '$1x $2');
-
-  // If a quadratic has single variable missing like "x^2 - 2 - 32 = 0", replace lone "2" with "x"
-  cleaned = cleaned.replace(/(x\^2\s*[+-]\s*)[2z]\s*([+-]\s*\d+\s*=)/gi, '$1x $2');
-
-  // If OCR read variable as 'z' in an equation with 'x' (e.g. "-4z" -> "-4x")
-  if (/\bx\^2\b|\bx\b/i.test(cleaned)) {
-    cleaned = cleaned.replace(/([+-]?\s*\d*)z\b/gi, '$1x');
-  }
-
-  // Step 7: Fix common OCR number confusion:
-  // 'O' or 'o' between digits or right after minus/plus or next to digits -> 0
-  cleaned = cleaned.replace(/(\d)[Oo]/g, '$10');
-  cleaned = cleaned.replace(/[Oo](\d)/g, '0$1');
-  cleaned = cleaned.replace(/([+\-=]\s*)[Oo](?!\w)/g, '$10');
-
-  // Isolated lowercase 'l' or pipe '|' or 'I' next to numbers or operators -> 1
-  cleaned = cleaned.replace(/(^|\s)[l|I](\s|$|[+\-*/=])/g, '$11$2');
-
-  // Trim and normalize multiple spaces
-  return cleaned.replace(/\s+/g, ' ').trim();
+  return sanitizeOCR(cleaned);
 }
 
 /**
@@ -175,10 +205,8 @@ function parseCoeff(raw: string): number {
  * Supports equations like ax^2 + bx + c = d (including non-zero right-hand side)
  */
 export function solveQuadratic(text: string): MathCalculatorResult | null {
-  // Pre-solve OCR normalizations
-  let normalized = text
-    .replace(/=\s*-[1l](\d+)/g, '= -$1')
-    .replace(/\bi\s*x\?/gi, 'x^2');
+  // Pre-solve OCR normalizations using aggressive sanitizer
+  let normalized = sanitizeOCR(text);
 
   // Primary: Support Equations with Non-Zero Right-Hand Side (ax^2 + bx + c = d)
   // Regex: /([+-]?\s*\d*)\s*x\^?2\s*([+-]\s*\d*)\s*x\s*([+-]\s*\d+)?\s*=\s*([+-]?\s*\d+)/i
@@ -247,21 +275,24 @@ export function solveQuadratic(text: string): MathCalculatorResult | null {
   const isPerfectSquare = Math.abs(s - Math.round(s)) < 1e-9;
   const sqrtD = Math.round(s);
 
-  // Exact roots calculation
+  // Exact roots calculation: r1 = (-b + s) / (2 * a), r2 = (-b - s) / (2 * a)
   const num1 = -b + sqrtD;
   const num2 = -b - sqrtD;
   const den = 2 * a;
 
-  const r1Formatted = formatFraction(num1, den);
-  const r2Formatted = formatFraction(num2, den);
-
-  // Distinct roots formatted for DeltaMath (comma-separated, sorted or clean)
   let deltaMathFormatAnswer = '';
-  if (r1Formatted === r2Formatted) {
-    deltaMathFormatAnswer = r1Formatted;
+  if (isPerfectSquare) {
+    const r1 = num1 / den;
+    const r2 = num2 / den;
+    const r1Str = Number.isInteger(r1) ? `${r1}` : formatFraction(num1, den);
+    const r2Str = Number.isInteger(r2) ? `${r2}` : formatFraction(num2, den);
+    deltaMathFormatAnswer = r1Str === r2Str ? `${r1Str}` : `${r1Str}, ${r2Str}`;
   } else {
-    // DeltaMath accepts comma separated list: "8, -4"
-    deltaMathFormatAnswer = `${r1Formatted}, ${r2Formatted}`;
+    const r1 = (-b + s) / den;
+    const r2 = (-b - s) / den;
+    const r1Str = Number.isInteger(r1) ? `${r1}` : r1.toFixed(2);
+    const r2Str = Number.isInteger(r2) ? `${r2}` : r2.toFixed(2);
+    deltaMathFormatAnswer = r1Str === r2Str ? `${r1Str}` : `${r1Str}, ${r2Str}`;
   }
 
   // Factor step breakdown
@@ -576,10 +607,24 @@ export function solveFactoringExpression(text: string): MathCalculatorResult | n
 /**
  * 5. Master Dispatcher: Runs 100% offline math calculations
  */
-export function calculateMathProblem(rawOcrText: string): MathCalculatorResult | null {
+export function calculateMathProblem(
+  rawOcrText: string
+): (MathCalculatorResult & { error?: string }) | { error: string } | null {
   if (!rawOcrText || rawOcrText.trim().length === 0) return null;
 
+  // 1. Check if the screen is a Solution / Incorrect breakdown page
+  const solutionCheck = checkSolutionScreen(rawOcrText);
+  if (solutionCheck) {
+    return solutionCheck;
+  }
+
   const cleaned = sanitizeMathOcrText(rawOcrText);
+
+  // Check cleaned text as well
+  const cleanedSolutionCheck = checkSolutionScreen(cleaned);
+  if (cleanedSolutionCheck) {
+    return cleanedSolutionCheck;
+  }
 
   // 1. Try Quadratic solver first
   const quadResult = solveQuadratic(cleaned);

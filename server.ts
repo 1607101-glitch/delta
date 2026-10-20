@@ -27,6 +27,14 @@ app.post('/api/solve', async (req: Request, res: Response) => {
     }
 
     const calculated = calculateMathProblem(problemText);
+    if (calculated && 'error' in calculated && calculated.error) {
+      res.json({
+        success: false,
+        error: calculated.error,
+      });
+      return;
+    }
+
     const result = calculated || solveMathLocally(problemText);
 
     if (result) {

@@ -174,20 +174,38 @@ export const LiveWebProxyBrowser: React.FC<LiveWebProxyBrowserProps> = ({ onAppl
         return;
       }
 
+      // 1. Ignore the Solution / Incorrect Pages
+      const lowerText = trimmed.toLowerCase();
+      if (
+        lowerText.includes('your answer') ||
+        lowerText.includes('(incorrect)') ||
+        lowerText.includes('greatest common factor') ||
+        lowerText.includes('set equal to zero')
+      ) {
+        setStatusText('Solution screen detected. Waiting for next problem...');
+        return;
+      }
+
       // 4. Standalone Internal Math Calculator (mathCalculator.ts)
       const solved = calculateMathProblem(trimmed);
       const elapsed = Math.round(performance.now() - startTime);
       setSolveDurationMs(elapsed);
 
       if (solved) {
-        setResult(solved);
+        if ('error' in solved && solved.error) {
+          setStatusText(solved.error);
+          return;
+        }
+
+        const validResult = solved as MathCalculatorResult;
+        setResult(validResult);
         setStatusText(`Solved in ${elapsed}ms (Offline Standalone)`);
-        if (onApplyResult) onApplyResult(solved);
+        if (onApplyResult) onApplyResult(validResult);
 
         // Auto-copy to clipboard if enabled
-        if (autoCopyEnabled && solved.deltaMathFormatAnswer) {
+        if (autoCopyEnabled && validResult.deltaMathFormatAnswer) {
           try {
-            await navigator.clipboard.writeText(solved.deltaMathFormatAnswer);
+            await navigator.clipboard.writeText(validResult.deltaMathFormatAnswer);
             setCopiedToast(true);
             setTimeout(() => setCopiedToast(false), 2000);
           } catch {

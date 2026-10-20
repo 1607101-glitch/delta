@@ -3,6 +3,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import { solveMathLocally } from './src/utils/mathSolver.ts';
+import { calculateMathProblem } from './src/utils/mathCalculator.ts';
 
 dotenv.config();
 
@@ -25,7 +26,8 @@ app.post('/api/solve', async (req: Request, res: Response) => {
       return;
     }
 
-    const result = solveMathLocally(problemText);
+    const calculated = calculateMathProblem(problemText);
+    const result = calculated || solveMathLocally(problemText);
 
     if (result) {
       res.json({

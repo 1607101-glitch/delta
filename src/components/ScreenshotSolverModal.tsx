@@ -4,6 +4,7 @@ import { SolverResult } from '../types';
 import { MathRenderer } from './MathRenderer';
 import { createWorker } from 'tesseract.js';
 import { solveMathLocally } from '../utils/mathSolver';
+import { calculateMathProblem } from '../utils/mathCalculator';
 
 interface ScreenshotSolverModalProps {
   isOpen: boolean;
@@ -82,12 +83,13 @@ export const ScreenshotSolverModal: React.FC<ScreenshotSolverModalProps> = ({
         throw new Error('No text or math detected in image. Please ensure image is clear.');
       }
 
-      const solved = solveMathLocally(extractedText);
+      const solvedCalc = calculateMathProblem(extractedText);
+      const solved = solvedCalc || solveMathLocally(extractedText);
       if (!solved) {
         throw new Error(`Detected: "${extractedText.slice(0, 100)}...". Could not match algebraic equation pattern.`);
       }
 
-      setResult(solved);
+      setResult(solved as any);
     } catch (err: any) {
       setError(err.message || 'Error processing image.');
     } finally {

@@ -5,7 +5,7 @@
 
 import React, { useState } from 'react';
 import { DeltaMathHeader } from './components/DeltaMathHeader';
-import { LiveTabSync } from './components/LiveTabSync';
+import { LiveWebProxyBrowser } from './components/LiveWebProxyBrowser';
 import { SolverWorkspace } from './components/SolverWorkspace';
 import { ScreenshotSolverModal } from './components/ScreenshotSolverModal';
 
@@ -25,7 +25,7 @@ export default function App() {
       {/* Main Workspace */}
       <main className="flex-1 max-w-6xl w-full mx-auto p-4 sm:p-6 lg:p-8">
         {activeTab === 'tab-sync' ? (
-          <LiveTabSync />
+          <LiveWebProxyBrowser />
         ) : (
           <SolverWorkspace />
         )}

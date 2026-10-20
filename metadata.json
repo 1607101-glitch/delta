@@ -1,6 +1,6 @@
 {
   "name": "DeltaSolve - DeltaMath In-App Solver & Auto-Assistant",
-  "description": "An all-in-one in-app DeltaMath solver, practice portal, and automated homework companion. Features live screenshot OCR, automatic step-by-step problem solver, interactive math canvas, and DeltaMath syntax converter.",
+  "description": "A 100% standalone and offline DeltaMath solver and homework companion. Features real-time live tab screen sync, in-browser WebAssembly OCR, and automated algebra solver.",
   "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+  "majorCapabilities": []
 }

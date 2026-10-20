@@ -2,6 +2,8 @@ import React, { useState, useEffect, useRef } from 'react';
 import { X, Upload, Camera, Sparkles, Check, Copy, ArrowRight, Image as ImageIcon } from 'lucide-react';
 import { SolverResult } from '../types';
 import { MathRenderer } from './MathRenderer';
+import { createWorker } from 'tesseract.js';
+import { solveMathLocally } from '../utils/mathSolver';
 
 interface ScreenshotSolverModalProps {
   isOpen: boolean;
@@ -71,23 +73,23 @@ export const ScreenshotSolverModal: React.FC<ScreenshotSolverModalProps> = ({
     setIsSolving(true);
     setError(null);
     try {
-      const res = await fetch('/api/solve', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          imageBase64: selectedImage,
-          mimeType: 'image/png',
-          instructions: 'DeltaMath screenshot. Extract problem, compute exact answer and step-by-step solution.',
-        }),
-      });
+      const worker = await createWorker('eng');
+      const ret = await worker.recognize(selectedImage);
+      await worker.terminate();
 
-      const data = await res.json();
-      if (!data.success) {
-        throw new Error(data.error || 'Failed to analyze screenshot.');
+      const extractedText = ret?.data?.text || '';
+      if (!extractedText.trim()) {
+        throw new Error('No text or math detected in image. Please ensure image is clear.');
       }
-      setResult(data.data);
+
+      const solved = solveMathLocally(extractedText);
+      if (!solved) {
+        throw new Error(`Detected: "${extractedText.slice(0, 100)}...". Could not match algebraic equation pattern.`);
+      }
+
+      setResult(solved);
     } catch (err: any) {
-      setError(err.message || 'Error communicating with solver service.');
+      setError(err.message || 'Error processing image.');
     } finally {
       setIsSolving(false);
     }

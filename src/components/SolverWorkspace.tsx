@@ -2,6 +2,8 @@ import React, { useState, useEffect } from 'react';
 import { SolverResult } from '../types';
 import { DeltaKeypad } from './DeltaKeypad';
 import { MathRenderer } from './MathRenderer';
+import { solveMathLocally } from '../utils/mathSolver';
+import { createWorker } from 'tesseract.js';
 import {
   Sparkles,
   Zap,
@@ -27,7 +29,7 @@ export const SolverWorkspace: React.FC<SolverWorkspaceProps> = ({ onSolutionSolv
   const [copied, setCopied] = useState(false);
   const [showKeypad, setShowKeypad] = useState(false);
 
-  // Check URL query parameter ?problem=... on mount (for Bookmarklet integration)
+  // Check URL query parameter ?problem=... on mount
   useEffect(() => {
     if (typeof window !== 'undefined') {
       const params = new URLSearchParams(window.location.search);
@@ -70,24 +72,24 @@ export const SolverWorkspace: React.FC<SolverWorkspaceProps> = ({ onSolutionSolv
     setIsSolving(true);
     setError(null);
     try {
-      const res = await fetch('/api/solve', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          imageBase64: base64Image,
-          mimeType: 'image/png',
-          instructions: 'Pasted DeltaMath screenshot. Extract problem and solve with exact DeltaMath syntax.',
-        }),
-      });
+      const worker = await createWorker('eng');
+      const ret = await worker.recognize(base64Image);
+      await worker.terminate();
 
-      const data = await res.json();
-      if (!data.success) throw new Error(data.error || 'Failed to solve screenshot.');
-      setResult(data.data);
-      if (data.data.parsedProblem) setProblemInput(data.data.parsedProblem);
-      if (onSolutionSolved) onSolutionSolved(data.data);
+      const extractedText = ret?.data?.text || '';
+      if (!extractedText.trim()) throw new Error('No math problem detected in pasted image.');
 
-      if (data.data.deltaMathFormatAnswer) {
-        navigator.clipboard.writeText(data.data.deltaMathFormatAnswer);
+      const solved = solveMathLocally(extractedText);
+      if (!solved) {
+        throw new Error(`Read: "${extractedText.slice(0, 80)}". Could not match algebraic pattern.`);
+      }
+
+      setResult(solved);
+      if (solved.parsedProblem) setProblemInput(solved.parsedProblem);
+      if (onSolutionSolved) onSolutionSolved(solved);
+
+      if (solved.deltaMathFormatAnswer) {
+        navigator.clipboard.writeText(solved.deltaMathFormatAnswer);
         setCopied(true);
         setTimeout(() => setCopied(false), 2500);
       }
@@ -106,28 +108,29 @@ export const SolverWorkspace: React.FC<SolverWorkspaceProps> = ({ onSolutionSolv
     setError(null);
 
     try {
-      const res = await fetch('/api/solve', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          problemText: text,
-          topic,
-        }),
-      });
+      // 1. Instant client-side solve
+      const localResult = solveMathLocally(text);
 
-      const data = await res.json();
-      if (!data.success) {
-        throw new Error(data.error || 'Failed to solve problem.');
-      }
-      setResult(data.data);
-      if (onSolutionSolved) {
-        onSolutionSolved(data.data);
-      }
+      if (localResult) {
+        setResult(localResult);
+        if (onSolutionSolved) onSolutionSolved(localResult);
 
-      if (data.data.deltaMathFormatAnswer) {
-        navigator.clipboard.writeText(data.data.deltaMathFormatAnswer);
-        setCopied(true);
-        setTimeout(() => setCopied(false), 2500);
+        if (localResult.deltaMathFormatAnswer) {
+          navigator.clipboard.writeText(localResult.deltaMathFormatAnswer);
+          setCopied(true);
+          setTimeout(() => setCopied(false), 2500);
+        }
+      } else {
+        // Fallback to local server endpoint
+        const res = await fetch('/api/solve', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ problemText: text }),
+        });
+        const data = await res.json();
+        if (!data.success) throw new Error(data.error || 'Could not parse algebraic equation.');
+        setResult(data.data);
+        if (onSolutionSolved) onSolutionSolved(data.data);
       }
     } catch (err: any) {
       setError(err.message || 'Error occurred while solving.');

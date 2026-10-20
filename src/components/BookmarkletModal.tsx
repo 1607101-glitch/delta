@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { X, Bookmark, Copy, Check, Sparkles, ExternalLink, HelpCircle } from 'lucide-react';
+import { X, Bookmark, Copy, Check, ExternalLink, ShieldCheck, Zap } from 'lucide-react';
 
 interface BookmarkletModalProps {
   isOpen: boolean;
@@ -7,17 +7,21 @@ interface BookmarkletModalProps {
 }
 
 export const BookmarkletModal: React.FC<BookmarkletModalProps> = ({ isOpen, onClose }) => {
-  const [copied, setCopied] = useState(false);
+  const [copiedType, setCopiedType] = useState<'copy' | 'open' | null>(null);
 
   if (!isOpen) return null;
 
   const currentOrigin = typeof window !== 'undefined' ? window.location.origin : '';
-  const bookmarkletCode = `javascript:(function(){var s=document.createElement('script');s.src='${currentOrigin}/deltabot-injected.js?_='+Date.now();document.body.appendChild(s);})();`;
 
-  const handleCopy = () => {
-    navigator.clipboard.writeText(bookmarkletCode);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+  // 100% self-contained inline bookmarklet: ZERO external network fetches or script tags (Linewize & CSP safe)
+  const copyProblemBookmarklet = `javascript:(function(){try{var s=['.problem-content','.problem','#problem','.problem-body','.question-body','.practice-problem','[class*="problem"]','main'];var t='';for(var i=0;i<s.length;i++){var el=document.querySelector(s[i]);if(el&&el.innerText&&el.innerText.trim().length>10){t=el.innerText.trim();break;}}if(!t){t=window.getSelection().toString().trim()||document.body.innerText.slice(0,350);}if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(t);}else{var a=document.createElement('textarea');a.value=t;document.body.appendChild(a);a.select();document.execCommand('copy');document.body.removeChild(a);}var o=document.getElementById('deltasolve-toast');if(o)o.remove();var d=document.createElement('div');d.id='deltasolve-toast';d.style.cssText='position:fixed;top:20px;right:20px;z-index:9999999;background:#0284c7;color:#fff;padding:12px 18px;border-radius:10px;font-family:sans-serif;font-size:14px;box-shadow:0 10px 25px rgba(0,0,0,0.35);font-weight:600;display:flex;align-items:center;gap:8px;transition:opacity 0.3s;';d.innerHTML='&#10003; DeltaMath problem copied! Switch to DeltaSolve or press Ctrl+V.';document.body.appendChild(d);setTimeout(function(){d.style.opacity='0';setTimeout(function(){d.remove();},300);},3000);}catch(e){alert('DeltaSolve: '+e.message);}})();`;
+
+  const openInAppBookmarklet = `javascript:(function(){try{var s=['.problem-content','.problem','#problem','.problem-body','.question-body','.practice-problem','[class*="problem"]','main'];var t='';for(var i=0;i<s.length;i++){var el=document.querySelector(s[i]);if(el&&el.innerText&&el.innerText.trim().length>10){t=el.innerText.trim();break;}}if(!t){t=window.getSelection().toString().trim()||document.body.innerText.slice(0,350);}window.open('${currentOrigin}/?problem='+encodeURIComponent(t),'_blank');}catch(e){alert('DeltaSolve: '+e.message);}})();`;
+
+  const handleCopy = (code: string, type: 'copy' | 'open') => {
+    navigator.clipboard.writeText(code);
+    setCopiedType(type);
+    setTimeout(() => setCopiedType(null), 2000);
   };
 
   return (
@@ -25,14 +29,14 @@ export const BookmarkletModal: React.FC<BookmarkletModalProps> = ({ isOpen, onCl
       <div className="relative w-full max-w-xl bg-slate-900 border border-slate-700 rounded-2xl shadow-2xl overflow-hidden">
         {/* Header */}
         <div className="bg-gradient-to-r from-blue-900 to-indigo-900 p-5 text-white flex items-center justify-between border-b border-blue-700/50">
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2.5">
             <div className="p-2 rounded-xl bg-sky-500/20 text-sky-300 border border-sky-400/30">
-              <Bookmark className="w-5 h-5" />
+              <ShieldCheck className="w-5 h-5 text-emerald-400" />
             </div>
             <div>
-              <h3 className="text-lg font-bold">1-Click DeltaBot Bookmarklet</h3>
+              <h3 className="text-base font-bold">Linewize & CSP-Safe DeltaMath Bookmarklets</h3>
               <p className="text-xs text-blue-200">
-                Run DeltaBot directly on any external deltamath.com browser tab
+                100% self-contained JavaScript • Zero external network requests
               </p>
             </div>
           </div>
@@ -47,61 +51,98 @@ export const BookmarkletModal: React.FC<BookmarkletModalProps> = ({ isOpen, onCl
 
         {/* Content */}
         <div className="p-6 space-y-4 text-xs text-slate-300">
-          <p className="text-sm text-slate-200">
-            If you are already logged into DeltaMath in another browser tab (such as through school Google Chromebook SSO), you can run DeltaBot directly on that page with this bookmarklet.
-          </p>
+          <div className="p-3 bg-emerald-950/40 border border-emerald-500/30 rounded-xl text-emerald-300 text-xs">
+            <strong>School Chromebook Verified:</strong> Unlike traditional extensions or remote scripts, these bookmarklets run purely inside your browser memory without loading external scripts, preventing DeltaMath Content Security Policy (CSP) and Linewize blocks.
+          </div>
 
-          <div className="p-4 rounded-xl bg-slate-950 border border-slate-800 space-y-2">
-            <span className="text-[11px] font-bold uppercase tracking-wider text-sky-400">
-              Bookmarklet Code:
-            </span>
-            <div className="p-2.5 rounded-lg bg-slate-900 border border-slate-800 font-mono text-[11px] text-sky-200 break-all select-all">
-              {bookmarkletCode}
+          {/* Option 1: Copy problem to clipboard */}
+          <div className="p-4 bg-slate-950 border border-slate-800 rounded-xl space-y-2.5">
+            <div className="flex items-center justify-between">
+              <span className="font-bold text-white text-xs flex items-center gap-1.5">
+                <Bookmark className="w-3.5 h-3.5 text-sky-400" />
+                1. "Copy Question" Bookmarklet (Recommended)
+              </span>
+              <span className="text-[10px] text-slate-400 font-mono">Copies DOM text to clipboard</span>
             </div>
-
-            <div className="pt-2 flex items-center justify-between">
+            <p className="text-slate-400 text-[11px]">
+              Clicking this bookmarklet on DeltaMath extracts the question text/math and shows a toast. Then switch to this tab or press <kbd className="px-1 rounded bg-slate-800 text-sky-300">Ctrl+V</kbd>.
+            </p>
+            <div className="flex items-center gap-2 pt-1">
               <button
                 type="button"
-                onClick={handleCopy}
-                className="px-4 py-2 bg-sky-600 hover:bg-sky-500 text-white font-semibold rounded-lg flex items-center gap-2 transition cursor-pointer"
+                onClick={() => handleCopy(copyProblemBookmarklet, 'copy')}
+                className="px-3 py-1.5 bg-sky-600 hover:bg-sky-500 text-white font-semibold rounded-lg flex items-center gap-1.5 transition"
               >
-                {copied ? (
+                {copiedType === 'copy' ? (
                   <>
-                    <Check className="w-4 h-4 text-emerald-300" />
-                    <span>Copied Bookmarklet!</span>
+                    <Check className="w-3.5 h-3.5 text-emerald-300" />
+                    <span>Copied!</span>
                   </>
                 ) : (
                   <>
-                    <Copy className="w-4 h-4" />
+                    <Copy className="w-3.5 h-3.5" />
                     <span>Copy Bookmarklet Code</span>
                   </>
                 )}
               </button>
-
               <a
-                href={bookmarkletCode}
+                href={copyProblemBookmarklet}
                 onClick={(e) => {
                   e.preventDefault();
-                  alert('Drag this button to your Bookmarks Toolbar in your browser!');
+                  alert('Drag this button to your Bookmarks Toolbar in Chrome!');
                 }}
-                className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 font-semibold rounded-lg border border-slate-600 transition cursor-grab"
-                title="Drag to your bookmarks bar"
+                className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 font-medium rounded-lg border border-slate-700 cursor-grab"
               >
                 ★ Drag to Bookmarks
               </a>
             </div>
           </div>
 
-          <div className="space-y-2 pt-2">
-            <h4 className="font-bold text-slate-200 flex items-center gap-1.5 text-xs uppercase tracking-wider">
-              <HelpCircle className="w-4 h-4 text-sky-400" />
-              Quick 30-Second Setup:
-            </h4>
-            <ol className="list-decimal list-inside space-y-1 text-slate-400 pl-1 leading-relaxed">
-              <li>Copy the bookmarklet code above or drag the button to your Bookmarks bar.</li>
-              <li>Open your DeltaMath assignment at <code className="text-sky-300">deltamath.com</code>.</li>
-              <li>Click the bookmark in your bookmarks bar. The floating DeltaBot HUD will immediately appear on the live page!</li>
-            </ol>
+          {/* Option 2: Direct Open in DeltaSolve */}
+          <div className="p-4 bg-slate-950 border border-slate-800 rounded-xl space-y-2.5">
+            <div className="flex items-center justify-between">
+              <span className="font-bold text-white text-xs flex items-center gap-1.5">
+                <Zap className="w-3.5 h-3.5 text-amber-400" />
+                2. "Solve in DeltaSolve" Bookmarklet
+              </span>
+              <span className="text-[10px] text-slate-400 font-mono">Opens solver with ?problem=...</span>
+            </div>
+            <p className="text-slate-400 text-[11px]">
+              Extracts the question and opens a new tab in this solver with the problem auto-populated and solved immediately.
+            </p>
+            <div className="flex items-center gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => handleCopy(openInAppBookmarklet, 'open')}
+                className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 font-semibold rounded-lg border border-slate-700 flex items-center gap-1.5 transition"
+              >
+                {copiedType === 'open' ? (
+                  <>
+                    <Check className="w-3.5 h-3.5 text-emerald-400" />
+                    <span>Copied!</span>
+                  </>
+                ) : (
+                  <>
+                    <Copy className="w-3.5 h-3.5" />
+                    <span>Copy Code</span>
+                  </>
+                )}
+              </button>
+              <a
+                href={openInAppBookmarklet}
+                onClick={(e) => {
+                  e.preventDefault();
+                  alert('Drag this button to your Bookmarks Toolbar in Chrome!');
+                }}
+                className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-200 font-medium rounded-lg border border-slate-700 cursor-grab"
+              >
+                ★ Drag to Bookmarks
+              </a>
+            </div>
+          </div>
+
+          <div className="pt-1 text-[11px] text-slate-400">
+            <strong>How to add in Chrome:</strong> Press <kbd className="px-1 py-0.5 rounded bg-slate-800 text-slate-200">Ctrl + Shift + O</kbd> to open Bookmarks, click <em>Add new bookmark</em>, and paste the code into the URL field.
           </div>
         </div>
       </div>

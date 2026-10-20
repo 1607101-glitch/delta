@@ -100,6 +100,13 @@ export function sanitizeMathOcrText(rawText: string): string {
   cleaned = cleaned.replace(/[×•]/g, '*');
   cleaned = cleaned.replace(/[÷]/g, '/');
 
+  // Fix OCR confusion for "= -": Tesseract frequently misreads "= -4" as "= -14" or "= -l4"
+  // because the space and negative sign blur together into a "1"
+  cleaned = cleaned.replace(/=\s*-[1l](\d+)/g, '= -$1');
+
+  // Fix OCR confusion for leading variable squared: "i x?", "I x?"
+  cleaned = cleaned.replace(/\bi\s*x\?/gi, 'x^2');
+
   // Step 4: KaTeX Italic Exponent / Superscript 2 Normalizations
   // In KaTeX italic math font, x² or x^2 is frequently misread by OCR as:
   // "I 2?", "l 2?", "1 2?", "| 2?", "x 2?", "I 2^", "I 2", "2 2?"
@@ -165,59 +172,46 @@ function parseCoeff(raw: string): number {
 
 /**
  * 2. Quadratic Factoring Engine
- * Matches equations like ax^2 + bx + c = 0
+ * Supports equations like ax^2 + bx + c = d (including non-zero right-hand side)
  */
 export function solveQuadratic(text: string): MathCalculatorResult | null {
-  // Pattern 1: ax^2 + bx + c = 0
-  const quadRegex = /([+-]?\s*\d*)\s*x\^2\s*([+-]\s*\d*)\s*x\s*([+-]\s*\d+)\s*=\s*0/i;
-  const match = text.match(quadRegex);
+  // Pre-solve OCR normalizations
+  let normalized = text
+    .replace(/=\s*-[1l](\d+)/g, '= -$1')
+    .replace(/\bi\s*x\?/gi, 'x^2');
 
-  // Pattern 2: ax^2 + c = 0 or ax^2 + bx = 0
-  const quadSimpleRegex = /([+-]?\s*\d*)\s*x\^2\s*([+-]\s*\d+)\s*=\s*0/i;
-  const quadNoConstRegex = /([+-]?\s*\d*)\s*x\^2\s*([+-]\s*\d*)\s*x\s*=\s*0/i;
+  // Primary: Support Equations with Non-Zero Right-Hand Side (ax^2 + bx + c = d)
+  // Regex: /([+-]?\s*\d*)\s*x\^?2\s*([+-]\s*\d*)\s*x\s*([+-]\s*\d+)?\s*=\s*([+-]?\s*\d+)/i
+  const quadRegex = /([+-]?\s*\d*)\s*x\^?2\s*([+-]\s*\d*)\s*x\s*([+-]\s*\d+)?\s*=\s*([+-]?\s*\d+)/i;
+  const match = normalized.match(quadRegex);
 
   let a = 1, b = 0, c = 0;
   let equationFound = false;
   let matchedStr = '';
+  let rhs = 0;
 
   if (match) {
     a = parseCoeff(match[1]);
-    b = parseCoeff(match[2]);
-    c = parseFloat(match[3].replace(/\s+/g, ''));
+    b = match[2] ? parseCoeff(match[2]) : 0;
+    const lhsC = match[3] ? parseFloat(match[3].replace(/\s+/g, '')) : 0;
+    rhs = parseInt(match[4].replace(/\s+/g, ''), 10);
+    // Subtract the RHS from the constant term: c_eff = (c || 0) - parseInt(rhs).
+    // In x^2 + 2x - 4 = -4: a = 1, b = 2, c = -4 - (-4) = 0.
+    c = (lhsC || 0) - rhs;
     equationFound = true;
     matchedStr = match[0];
   } else {
-    const mSimple = text.match(quadSimpleRegex);
+    // Fallback: ax^2 + c = d or ax^2 = d (no linear x term, e.g. x^2 - 16 = 0 or 2x^2 = 18)
+    const quadNoLinear = /([+-]?\s*\d*)\s*x\^?2\s*([+-]\s*\d+)?\s*=\s*([+-]?\s*\d+)/i;
+    const mSimple = normalized.match(quadNoLinear);
     if (mSimple) {
       a = parseCoeff(mSimple[1]);
       b = 0;
-      c = parseFloat(mSimple[2].replace(/\s+/g, ''));
+      const lhsC = mSimple[2] ? parseFloat(mSimple[2].replace(/\s+/g, '')) : 0;
+      rhs = parseInt(mSimple[3].replace(/\s+/g, ''), 10);
+      c = (lhsC || 0) - rhs;
       equationFound = true;
       matchedStr = mSimple[0];
-    } else {
-      const mNoConst = text.match(quadNoConstRegex);
-      if (mNoConst) {
-        a = parseCoeff(mNoConst[1]);
-        b = parseCoeff(mNoConst[2]);
-        c = 0;
-        equationFound = true;
-        matchedStr = mNoConst[0];
-      }
-    }
-  }
-
-  // Also match general ax^2 + bx + c with RHS != 0: ax^2 + bx + c = d
-  if (!equationFound) {
-    const generalQuad = /([+-]?\s*\d*)\s*x\^2\s*([+-]\s*\d*)\s*x\s*([+-]\s*\d+)?\s*=\s*([+-]?\s*\d+)/i;
-    const gMatch = text.match(generalQuad);
-    if (gMatch) {
-      a = parseCoeff(gMatch[1]);
-      b = gMatch[2] ? parseCoeff(gMatch[2]) : 0;
-      const lhsC = gMatch[3] ? parseFloat(gMatch[3].replace(/\s+/g, '')) : 0;
-      const rhs = parseFloat(gMatch[4].replace(/\s+/g, ''));
-      c = lhsC - rhs;
-      equationFound = true;
-      matchedStr = gMatch[0];
     }
   }
 
@@ -275,7 +269,10 @@ export function solveQuadratic(text: string): MathCalculatorResult | null {
     {
       stepNumber: 1,
       title: 'Standard Form & Coefficients',
-      content: `Extract coefficients from ${a}x² ${b >= 0 ? `+ ${b}` : b}x ${c >= 0 ? `+ ${c}` : c} = 0`,
+      content:
+        rhs !== 0
+          ? `Rearrange ${matchedStr} into standard form: ${a}x² ${b >= 0 ? `+ ${b}` : b}x ${c >= 0 ? `+ ${c}` : c} = 0 (subtract ${rhs} from both sides)`
+          : `Extract coefficients from ${a}x² ${b >= 0 ? `+ ${b}` : b}x ${c >= 0 ? `+ ${c}` : c} = 0`,
       mathLatex: `a = ${a},\\ b = ${b},\\ c = ${c}`,
     },
     {

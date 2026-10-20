@@ -55,7 +55,8 @@ export function sanitizeMathOCR(raw: string): string {
     .replace(/±/g, '+-')
     .replace(/[×✕]/g, '*')
     .replace(/[÷]/g, '/')
-    .replace(/θ/g, 'theta')
+    .replace(/=\s*-[1l](\d+)/g, '= -$1')
+    .replace(/\bi\s*x\?/gi, 'x^2')
     .replace(/[\u00A0\u1680\u180E\u2000-\u200B\u202F\u205F\u3000\uFEFF]/g, ' ')
     .trim();
 }

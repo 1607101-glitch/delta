@@ -44,21 +44,29 @@ export function captureAndPreprocessFrame(
   const cropW = customCrop?.cropW ?? defaultCrop.cropW;
   const cropH = customCrop?.cropH ?? defaultCrop.cropH;
 
-  // Offscreen canvas matching the cropped dimensions
+  // 1. Upscale Canvas 2.5x Before OCR (Critical for Math Glyphs)
+  // KaTeX fonts at standard browser scale are ~18px tall, which is too small for Tesseract to distinguish cursive 'x' from '2' or 'z'.
+  const scale = 2.5;
+  const targetW = Math.round(cropW * scale);
+  const targetH = Math.round(cropH * scale);
+
   const canvas = document.createElement('canvas');
-  canvas.width = cropW;
-  canvas.height = cropH;
+  canvas.width = targetW;
+  canvas.height = targetH;
 
   const ctx = canvas.getContext('2d', { willReadFrequently: true });
   if (!ctx) return null;
 
-  // 1. Draw cropped region
-  ctx.drawImage(video, cropX, cropY, cropW, cropH, 0, 0, cropW, cropH);
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+
+  // 1. Draw cropped region upscaled 2.5x
+  ctx.drawImage(video, cropX, cropY, cropW, cropH, 0, 0, targetW, targetH);
 
   // 2. High-Contrast Binarization Filter (Pre-OCR)
   // KaTeX math characters have thin lines and faint anti-aliasing that cause OCR misreads.
   try {
-    const imgData = ctx.getImageData(0, 0, cropW, cropH);
+    const imgData = ctx.getImageData(0, 0, targetW, targetH);
     const data = imgData.data;
 
     for (let i = 0; i < data.length; i += 4) {
@@ -66,7 +74,7 @@ export function captureAndPreprocessFrame(
       const gray = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
 
       // High-contrast binarization threshold (black text on white background)
-      const val = gray > 175 ? 255 : 0;
+      const val = gray > 180 ? 255 : 0;
       data[i] = val;     // R
       data[i + 1] = val; // G
       data[i + 2] = val; // B

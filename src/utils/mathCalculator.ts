@@ -49,15 +49,45 @@ export function formatFraction(numerator: number, denominator: number): string {
 }
 
 /**
+ * Isolates the active equation line from multi-line DeltaMath OCR text.
+ * Filters out button text like "No Solution", "Attempt 2", "Watch Video", etc.
+ */
+export function extractEquationLine(rawText: string): string {
+  const lines = rawText.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  if (lines.length <= 1) return rawText;
+
+  // Filter out pure UI chrome / button lines
+  const mathLines = lines.filter(
+    (l) => !/^(score|penalty|attempt|watch|submit|delta|next|no\s*solution)/i.test(l)
+  );
+
+  // 1. Look for a line containing '='
+  const eqLine = mathLines.find((l) => l.includes('='));
+  if (eqLine) return eqLine;
+
+  // 2. Look for lines with math expressions or algebra keywords
+  const exprLine = mathLines.find((l) => /[²\^]|factor|solve/i.test(l));
+  if (exprLine) return exprLine;
+
+  return mathLines.join(' ');
+}
+
+/**
  * 1. OCR Normalization & Sanitization
+ * Specifically targets KaTeX italic font misrecognitions (cursive x, exponents).
  */
 export function sanitizeMathOcrText(rawText: string): string {
-  let cleaned = rawText;
+  if (!rawText) return '';
 
-  // Remove filler DeltaMath UI chrome text
+  // Step 1: Line filtering to isolate the equation line from button labels
+  let cleaned = extractEquationLine(rawText);
+
+  // Step 2: Remove filler DeltaMath UI chrome & button text (CRITICAL: 'No Solution' is a DeltaMath button!)
+  cleaned = cleaned.replace(/no\s*solution/gi, '');
   cleaned = cleaned.replace(/score:\s*\d+(\/\d+)?/gi, '');
   cleaned = cleaned.replace(/penalty:\s*[\d.]+\s*(%|off)?/gi, '');
-  cleaned = cleaned.replace(/watch\s*video/gi, '');
+  cleaned = cleaned.replace(/watch\s*(video|vid)?/gi, '');
+  cleaned = cleaned.replace(/stop\s*watching/gi, '');
   cleaned = cleaned.replace(/show\s*example[s]?/gi, '');
   cleaned = cleaned.replace(/attempt\s*\d+\s*(of\s*\d+)?/gi, '');
   cleaned = cleaned.replace(/next\s*problem/gi, '');
@@ -65,14 +95,51 @@ export function sanitizeMathOcrText(rawText: string): string {
   cleaned = cleaned.replace(/delta\s*math/gi, '');
   cleaned = cleaned.replace(/calculator/gi, '');
 
-  // Replace unicode dashes & minus signs
+  // Step 3: Replace unicode dashes, minus signs, and math operators
   cleaned = cleaned.replace(/[−–—]/g, '-');
+  cleaned = cleaned.replace(/[×•]/g, '*');
+  cleaned = cleaned.replace(/[÷]/g, '/');
 
-  // Normalize exponents: x², x2 right after x, x^2
+  // Step 4: KaTeX Italic Exponent / Superscript 2 Normalizations
+  // In KaTeX italic math font, x² or x^2 is frequently misread by OCR as:
+  // "I 2?", "l 2?", "1 2?", "| 2?", "x 2?", "I 2^", "I 2", "2 2?"
+  cleaned = cleaned.replace(/(?:^|(?<=[-+=\s(]))[I|l|1]\s*[2\^]\?/gi, 'x^2');
+  cleaned = cleaned.replace(/(?:^|(?<=[-+=\s(]))[I|l|1]\s*2\?/gi, 'x^2');
+  cleaned = cleaned.replace(/(?:^|(?<=[-+=\s(]))[I|l|1]\s*\^\s*2\b/gi, 'x^2');
+  cleaned = cleaned.replace(/(?:^|(?<=[-+=\s(]))[I|l|1]\s*2(?=\s*[-+*=])/gi, 'x^2');
+  cleaned = cleaned.replace(/(?:^|(?<=[-+=\s(]))\b2\s*\?\b/g, 'x^2');
+  cleaned = cleaned.replace(/(?:^|(?<=[-+=\s(]))\b2\s*2\?\b/g, 'x^2');
+
+  // Standard exponent normalizations: x², x2, x 2?
+  cleaned = cleaned.replace(/([a-zA-Z])\s*2\?/g, '$1^2');
   cleaned = cleaned.replace(/([a-zA-Z])[²2]/g, '$1^2');
   cleaned = cleaned.replace(/([a-zA-Z])\s*\^\s*2/g, '$1^2');
 
-  // Fix common OCR number confusion:
+  // Step 5: KaTeX Cursive Italic 'x' Glyph Disambiguation
+  // Cursive x has curved loops that OCR often reads as ")c", ")(", "><", "}{"
+  cleaned = cleaned.replace(/\)\s*[c\(\)]/g, 'x');
+  cleaned = cleaned.replace(/><|></g, 'x');
+  cleaned = cleaned.replace(/\}\s*\{/g, 'x');
+
+  // Step 6: KaTeX Cursive Italic 'x' Confused With '2' or 'z' (e.g. "-42-32=0" -> "-4x-32=0")
+  // In a quadratic equation context: ax^2 + bx + c = 0
+  // When an equation starts with x^2 and is followed by -42-32=0 or -42 - 32 = 0,
+  // the '2' right after the coefficient -4 was the italic variable x!
+  cleaned = cleaned.replace(/(x\^2\s*[+-]\s*\d*)[2z]\s*([+-]\s*\d+\s*=)/gi, (match, prefix, suffix) => {
+    return `${prefix}x ${suffix}`;
+  });
+  cleaned = cleaned.replace(/(x\^2\s*[+-]\s*)(\d+)2\s*([+-]\s*\d+\s*=)/gi, '$1$2x $3');
+  cleaned = cleaned.replace(/([+-]?\s*\d+)[2z]\s*([+-]\s*\d+\s*=)/gi, '$1x $2');
+
+  // If a quadratic has single variable missing like "x^2 - 2 - 32 = 0", replace lone "2" with "x"
+  cleaned = cleaned.replace(/(x\^2\s*[+-]\s*)[2z]\s*([+-]\s*\d+\s*=)/gi, '$1x $2');
+
+  // If OCR read variable as 'z' in an equation with 'x' (e.g. "-4z" -> "-4x")
+  if (/\bx\^2\b|\bx\b/i.test(cleaned)) {
+    cleaned = cleaned.replace(/([+-]?\s*\d*)z\b/gi, '$1x');
+  }
+
+  // Step 7: Fix common OCR number confusion:
   // 'O' or 'o' between digits or right after minus/plus or next to digits -> 0
   cleaned = cleaned.replace(/(\d)[Oo]/g, '$10');
   cleaned = cleaned.replace(/[Oo](\d)/g, '0$1');
@@ -81,11 +148,8 @@ export function sanitizeMathOcrText(rawText: string): string {
   // Isolated lowercase 'l' or pipe '|' or 'I' next to numbers or operators -> 1
   cleaned = cleaned.replace(/(^|\s)[l|I](\s|$|[+\-*/=])/g, '$11$2');
 
-  // Replace common unicode multiplication
-  cleaned = cleaned.replace(/[×•]/g, '*');
-
-  // Trim whitespace
-  return cleaned.trim();
+  // Trim and normalize multiple spaces
+  return cleaned.replace(/\s+/g, ' ').trim();
 }
 
 /**
@@ -337,6 +401,14 @@ export function solveLinearEquation(text: string): MathCalculatorResult | null {
   const right = parseLinearSide(rightSide);
 
   if (!left || !right) return null;
+
+  // CRITICAL: A linear equation MUST contain the variable 'x' on at least one side.
+  // If neither side has any variable term (e.g. OCR misread arithmetic "-42 - 32 = 0"),
+  // it is a malformed or misread expression, NEVER a contradiction with "No solution"!
+  // Submitting "No solution" when an OCR text has no variable causes failed attempts in DeltaMath.
+  if (Math.abs(left.xCoeff) < 1e-9 && Math.abs(right.xCoeff) < 1e-9) {
+    return null;
+  }
 
   // ax + b = cx + d
   // (a - c)x = (d - b)
